@@ -203,7 +203,7 @@ class SearchField(BareField):
     do not support secondary indexes, using this field will prevent you
     from mistakenly creating the wrong kind of field on your FTS table.
     """
-    def __init__(self, unindexed=False, db_column=None, coerce=None):
+    def __init__(self, unindexed=False, db_column=None, coerce=None, **_):
         kwargs = {'null': True, 'db_column': db_column, 'coerce': coerce}
         self._unindexed = unindexed
         if unindexed:
@@ -211,8 +211,9 @@ class SearchField(BareField):
         super(SearchField, self).__init__(**kwargs)
 
     def clone_base(self, **kwargs):
-        return super(SearchField, self).clone_base(
-            unindexed=self._unindexed, **kwargs)
+        clone = super(SearchField, self).clone_base(**kwargs)
+        clone._unindexed = self._unindexed
+        return clone
 
 
 class _VirtualFieldMixin(object):
@@ -849,9 +850,7 @@ class SqliteExtDatabase(SqliteDatabase):
         if self._row_factory:
             conn.row_factory = self._row_factory
         if self._extensions:
-            conn.enable_load_extension(True)
-            for extension in self._extensions:
-                conn.load_extension(extension)
+            self._load_extensions(conn)
 
     def _load_aggregates(self, conn):
         for name, (klass, num_params) in self._aggregates.items():
@@ -864,6 +863,11 @@ class SqliteExtDatabase(SqliteDatabase):
     def _load_functions(self, conn):
         for name, (fn, num_params) in self._functions.items():
             conn.create_function(name, num_params, fn)
+
+    def _load_extensions(self, conn):
+        conn.enable_load_extension(True)
+        for extension in self._extensions:
+            conn.load_extension(extension)
 
     def register_aggregate(self, klass, name=None, num_params=-1):
         self._aggregates[name or klass.__name__.lower()] = (klass, num_params)

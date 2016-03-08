@@ -81,6 +81,7 @@ __all__ = [
     'ProgrammingError',
     'Proxy',
     'R',
+    'SmallIntegerField',
     'SqliteDatabase',
     'SQL',
     'TextField',
@@ -138,16 +139,16 @@ else:
 
 # By default, peewee supports Sqlite, MySQL and Postgresql.
 try:
-    from pysqlite2 import dbapi2 as pysqlite
+    from pysqlite2 import dbapi2 as pysq3
 except ImportError:
-    pysqlite = None
+    pysq3 = None
 try:
     import sqlite3
 except ImportError:
-    sqlite3 = pysqlite
+    sqlite3 = pysq3
 else:
-    if pysqlite and pysqlite.sqlite_version_info > sqlite3.sqlite_version_info:
-        sqlite3 = pysqlite
+    if pysq3 and pysq3.sqlite_version_info >= sqlite3.sqlite_version_info:
+        sqlite3 = pysq3
 
 try:
     from psycopg2cffi import compat
@@ -977,6 +978,9 @@ class IntegerField(Field):
 class BigIntegerField(IntegerField):
     db_field = 'bigint'
 
+class SmallIntegerField(IntegerField):
+    db_field = 'smallint'
+
 class PrimaryKeyField(IntegerField):
     db_field = 'primary_key'
 
@@ -1071,10 +1075,17 @@ class TextField(Field):
 
 class BlobField(Field):
     db_field = 'blob'
+    _constructor = binary_construct
+
+    def add_to_class(self, model_class, name):
+        self._constructor = model_class._meta.database.get_binary_type()
+        return super(BlobField, self).add_to_class(model_class, name)
 
     def db_value(self, value):
+        if isinstance(value, unicode_type):
+            value = value.encode('raw_unicode_escape')
         if isinstance(value, basestring):
-            return binary_construct(value)
+            return self._constructor(value)
         return value
 
 class UUIDField(Field):
@@ -1427,6 +1438,7 @@ class QueryCompiler(object):
         'float': 'REAL',
         'int': 'INTEGER',
         'primary_key': 'INTEGER',
+        'smallint': 'SMALLINT',
         'string': 'VARCHAR',
         'text': 'TEXT',
         'time': 'TIME',
@@ -1777,10 +1789,10 @@ class QueryCompiler(object):
         if query._order_by:
             clauses.extend([SQL('ORDER BY'), CommaClause(*query._order_by)])
 
-        if query._limit or (query._offset and db.limit_max):
-            limit = query._limit or db.limit_max
+        if query._limit is not None or (query._offset and db.limit_max):
+            limit = query._limit if query._limit is not None else db.limit_max
             clauses.append(SQL('LIMIT %s' % limit))
-        if query._offset:
+        if query._offset is not None:
             clauses.append(SQL('OFFSET %s' % query._offset))
 
         for_update, no_wait = query._for_update
@@ -1973,6 +1985,16 @@ class QueryCompiler(object):
         return Clause(*ddl)
     drop_table = return_parsed_node('_drop_table')
 
+    def _truncate_table(self, model_class, restart_identity=False,
+                        cascade=False):
+        ddl = [SQL('TRUNCATE TABLE'), model_class.as_entity()]
+        if restart_identity:
+            ddl.append(SQL('RESTART IDENTITY'))
+        if cascade:
+            ddl.append(SQL('CASCADE'))
+        return Clause(*ddl)
+    truncate_table = return_parsed_node('_truncate_table')
+
     def index_name(self, table, columns):
         index = '%s_%s' % (table, '_'.join(columns))
         if len(index) > 64:
@@ -2000,6 +2022,12 @@ class QueryCompiler(object):
     def _drop_sequence(self, sequence_name):
         return Clause(SQL('DROP SEQUENCE'), Entity(sequence_name))
     drop_sequence = return_parsed_node('_drop_sequence')
+
+
+class SqliteQueryCompiler(QueryCompiler):
+    def truncate_table(self, model_class, restart_identity=False,
+                       cascade=False):
+        return model_class.delete().sql()
 
 
 class ResultIterator(object):
@@ -3565,6 +3593,16 @@ class Database(object):
     def drop_tables(self, models, safe=False, cascade=False):
         drop_model_tables(models, fail_silently=safe, cascade=cascade)
 
+    def truncate_table(self, model_class, restart_identity=False,
+                       cascade=False):
+        qc = self.compiler()
+        return self.execute_sql(*qc.truncate_table(
+            model_class, restart_identity, cascade))
+
+    def truncate_tables(self, models, restart_identity=False, cascade=False):
+        for model in reversed(sort_models_topologically(models)):
+            model.truncate_table(restart_identity, cascade)
+
     def drop_sequence(self, seq):
         if self.sequences:
             qc = self.compiler()
@@ -3579,8 +3617,14 @@ class Database(object):
     def default_insert_clause(self, model_class):
         return SQL('DEFAULT VALUES')
 
+    def get_binary_type(self):
+        return binary_constructor
+
 class SqliteDatabase(Database):
+    compiler_class = SqliteQueryCompiler
     field_overrides = {
+        'bool': 'INTEGER',
+        'smallint': 'INTEGER',
         'uuid': 'TEXT',
     }
     foreign_keys = False
@@ -3687,6 +3731,9 @@ class SqliteDatabase(Database):
 
     def truncate_date(self, date_part, date_field):
         return fn.strftime(SQLITE_DATE_TRUNC_MAPPING[date_part], date_field)
+
+    def get_binary_type(self):
+        return sqlite3.Binary
 
 class PostgresqlDatabase(Database):
     commit_select = True
@@ -3832,6 +3879,9 @@ class PostgresqlDatabase(Database):
         path_params = ','.join(['%s'] * len(search_path))
         self.execute_sql('SET search_path TO %s' % path_params, search_path)
 
+    def get_binary_type(self):
+        return psycopg2.Binary
+
 class MySQLDatabase(Database):
     commit_select = True
     compound_operations = ['UNION', 'UNION ALL']
@@ -3920,6 +3970,9 @@ class MySQLDatabase(Database):
         return Clause(
             EnclosedClause(model_class._meta.primary_key),
             SQL('VALUES (DEFAULT)'))
+
+    def get_binary_type(self):
+        return mysql.Binary
 
 
 class _callable_context_manager(object):
@@ -4375,7 +4428,8 @@ class BaseModel(type):
 
         # initialize the new class and set the magic attributes
         cls = super(BaseModel, cls).__new__(cls, name, bases, attrs)
-        cls._meta = ModelOptions(cls, **meta_options)
+        ModelOptionsBase = meta_options.get('model_options_base', ModelOptions)
+        cls._meta = ModelOptionsBase(cls, **meta_options)
         cls._data = None
         cls._meta.indexes = list(cls._meta.indexes)
 
@@ -4500,9 +4554,15 @@ class Model(with_metaclass(BaseModel)):
     @classmethod
     def get_or_create(cls, **kwargs):
         defaults = kwargs.pop('defaults', {})
-        sq = cls.select().filter(**kwargs)
+        query = cls.select()
+        for field, value in kwargs.items():
+            if '__' in field:
+                query = query.filter(**{field: value})
+            else:
+                query = query.where(getattr(cls, field) == value)
+
         try:
-            return sq.get(), False
+            return query.get(), False
         except cls.DoesNotExist:
             try:
                 params = dict((k, v) for k, v in kwargs.items()
@@ -4512,7 +4572,7 @@ class Model(with_metaclass(BaseModel)):
                     return cls.create(**params), True
             except IntegrityError as exc:
                 try:
-                    return sq.get(), False
+                    return query.get(), False
                 except cls.DoesNotExist:
                     raise exc
 
@@ -4524,7 +4584,7 @@ class Model(with_metaclass(BaseModel)):
         except IntegrityError:
             query = []  # TODO: multi-column unique constraints.
             for field_name, value in kwargs.items():
-                field = cls._meta.fields[field_name]
+                field = getattr(cls, field_name)
                 if field.unique or field.primary_key:
                     query.append(field == value)
             return cls.get(*query), False
@@ -4597,6 +4657,10 @@ class Model(with_metaclass(BaseModel)):
     @classmethod
     def drop_table(cls, fail_silently=False, cascade=False):
         cls._meta.database.drop_table(cls, fail_silently, cascade)
+
+    @classmethod
+    def truncate_table(cls, restart_identity=False, cascade=False):
+        cls._meta.database.truncate_table(cls, restart_identity, cascade)
 
     @classmethod
     def as_entity(cls):
@@ -4718,6 +4782,9 @@ class Model(with_metaclass(BaseModel)):
                 else:
                     model.delete().where(query).execute()
         return self.delete().where(self._pk_expr()).execute()
+
+    def __hash__(self):
+        return hash((self.__class__, self._get_pk_value()))
 
     def __eq__(self, other):
         return (

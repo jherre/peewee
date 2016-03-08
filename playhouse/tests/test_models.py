@@ -4,11 +4,13 @@ import sys
 from functools import partial
 
 from peewee import *
+from peewee import ModelOptions
 from playhouse.tests.base import compiler
 from playhouse.tests.base import database_initializer
 from playhouse.tests.base import ModelTestCase
 from playhouse.tests.base import normal_compiler
 from playhouse.tests.base import PeeweeTestCase
+from playhouse.tests.base import skip_if
 from playhouse.tests.base import skip_unless
 from playhouse.tests.base import test_db
 from playhouse.tests.base import ulit
@@ -1352,6 +1354,21 @@ class TestDeleteRecursive(ModelTestCase):
         ])
 
 
+@skip_if(lambda: isinstance(test_db, MySQLDatabase))
+class TestTruncate(ModelTestCase):
+    requires = [User]
+
+    def test_truncate(self):
+        for i in range(3):
+            User.create(username='u%s' % i)
+
+        User.truncate_table(restart_identity=True)
+        self.assertEqual(User.select().count(), 0)
+
+        u = User.create(username='ux')
+        self.assertEqual(u.id, 1)
+
+
 class TestManyToMany(ModelTestCase):
     requires = [User, Category, UserCategory]
 
@@ -1430,6 +1447,39 @@ class TestManyToMany(ModelTestCase):
         self.assertEqual(
             sorted(result_list),
             ['c1', 'c12', 'c2', 'c23', 'c3', 'u1', 'u1', 'u2', 'u2', 'u2'])
+
+
+class TestCustomModelOptionsBase(PeeweeTestCase):
+    def test_custom_model_options_base(self):
+        db = SqliteDatabase(None)
+
+        class DatabaseDescriptor(object):
+            def __init__(self, db):
+                self._db = db
+
+            def __get__(self, instance_type, instance):
+                if instance is not None:
+                    return self._db
+                return self
+
+            def __set__(self, instance, value):
+                pass
+
+        class TestModelOptions(ModelOptions):
+            database = DatabaseDescriptor(db)
+
+        class BaseModel(Model):
+            class Meta:
+                model_options_base = TestModelOptions
+
+        class TestModel(BaseModel):
+            pass
+
+        class TestChildModel(TestModel):
+            pass
+
+        self.assertEqual(id(TestModel._meta.database), id(db))
+        self.assertEqual(id(TestChildModel._meta.database), id(db))
 
 
 class TestModelOptionInheritance(PeeweeTestCase):
@@ -1901,3 +1951,42 @@ class TestReturningClause(ModelTestCase):
         id_charlie = users[0][0]
         id_mickey = users[-1][0]
         self.assertEqual(id_mickey - id_charlie, 4)
+
+
+class TestModelHash(PeeweeTestCase):
+    def test_hash(self):
+        class MyUser(User):
+            pass
+
+        d = {}
+        u1 = User(id=1)
+        u2 = User(id=2)
+        u3 = User(id=3)
+        m1 = MyUser(id=1)
+        m2 = MyUser(id=2)
+        m3 = MyUser(id=3)
+
+        d[u1] = 'u1'
+        d[u2] = 'u2'
+        d[m1] = 'm1'
+        d[m2] = 'm2'
+        self.assertTrue(u1 in d)
+        self.assertTrue(u2 in d)
+        self.assertFalse(u3 in d)
+        self.assertTrue(m1 in d)
+        self.assertTrue(m2 in d)
+        self.assertFalse(m3 in d)
+
+        self.assertEqual(d[u1], 'u1')
+        self.assertEqual(d[u2], 'u2')
+        self.assertEqual(d[m1], 'm1')
+        self.assertEqual(d[m2], 'm2')
+
+        un = User()
+        mn = MyUser()
+        d[un] = 'un'
+        d[mn] = 'mn'
+        self.assertTrue(un in d)  # Hash implementation.
+        self.assertTrue(mn in d)
+        self.assertEqual(d[un], 'un')
+        self.assertEqual(d[mn], 'mn')

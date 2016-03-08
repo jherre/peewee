@@ -1,5 +1,6 @@
 import os
 import sys
+import warnings
 from distutils.core import setup
 from distutils.extension import Extension
 from distutils.version import StrictVersion
@@ -21,7 +22,10 @@ else:
 
 speedups_ext_module = Extension(
     'playhouse._speedups',
-    ['playhouse/speedups.pyx'])
+    ['playhouse/_speedups.pyx'])
+sqlite_udf_module = Extension(
+    'playhouse._sqlite_udf',
+    ['playhouse/_sqlite_udf.pyx'])
 sqlite_ext_module = Extension(
     'playhouse._sqlite_ext',
     ['playhouse/_sqlite_ext.pyx'])
@@ -29,7 +33,10 @@ sqlite_ext_module = Extension(
 
 ext_modules = []
 if cython_installed:
-    ext_modules.extend([speedups_ext_module, sqlite_ext_module])
+    ext_modules.extend([
+        speedups_ext_module,
+        sqlite_udf_module,
+        sqlite_ext_module])
 
 if ext_modules:
     setup_kwargs.update(
@@ -54,7 +61,6 @@ setup(
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
     ],
-    test_suite='tests',
     scripts = ['pwiz.py'],
     **setup_kwargs
 )
