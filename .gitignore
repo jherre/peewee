@@ -10,3 +10,10 @@ playhouse/tests/peewee_test.db
 .idea/
 MANIFEST
 peewee_test.db
+
+# jherre
+Vagrantfile
+tox.ini
+.gitignore
+.vagrant
+.tox
