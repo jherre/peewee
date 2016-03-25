@@ -1245,6 +1245,9 @@ class ObjectIdDescriptor(object):
         if instance is not None:
             return instance._data.get(self.attr_name)
 
+    def __set__(self, instance, value):
+        setattr(instance, self.attr_name, value)
+
 class ForeignKeyField(IntegerField):
     def __init__(self, rel_model, related_name=None, on_delete=None,
                  on_update=None, extra=None, to_field=None, *args, **kwargs):
@@ -2998,6 +3001,9 @@ class CompoundSelect(SelectQuery):
         query.rhs = self.rhs
         return query
 
+    def count(self, clear_limit=False):
+        return self.wrapped_count(clear_limit=clear_limit)
+
     def get_query_meta(self):
         return self.lhs.get_query_meta()
 
@@ -4617,7 +4623,7 @@ class Model(with_metaclass(BaseModel)):
     @classmethod
     def _fields_to_index(cls):
         fields = []
-        for field in cls._meta.fields.values():
+        for field in cls._meta.sorted_fields:
             if field.primary_key:
                 continue
             requires_index = any((

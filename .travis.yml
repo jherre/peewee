@@ -13,8 +13,10 @@ env:
   - PEEWEE_TEST_BACKEND=sqlite CYTHON_VERSION=0.23.4
   - PEEWEE_TEST_BACKEND=postgresql CYTHON_VERSION=0.23.4
   - PEEWEE_TEST_BACKEND=mysql CYTHON_VERSION=0.23.4
+addons:
+  postgresql: "9.4"
 services:
-  - postgres
+  - postgresql
   - mysql
 install:
   - "pip install Cython==$CYTHON_VERSION"
