@@ -1268,7 +1268,7 @@ Query Types
         >>> deleted_tweets.count()
         3  # number of tweets that are marked as deleted
 
-    .. py:method:: wrapped_count([clear_limit=True])
+    .. py:method:: wrapped_count([clear_limit=False])
 
         :param bool clear_limit: Remove any limit or offset clauses from the query before counting.
         :rtype: an integer representing the number of rows in the current query
@@ -2470,7 +2470,7 @@ The easiest way to create transactions and savepoints is to use :py:meth:`Databa
 
 .. py:class:: Using(database, models[, with_transaction=True])
 
-    For the duration of the wrapped block, all queries against the given ``models`` will use the specified ``database``. Optionally these queries can be run inside a transaction by specifying ``with_transaction=True``.
+    For the duration of the wrapped block, all queries against the given ``models`` will use the specified ``database``. Optionally these queries can be run outside a transaction by specifying ``with_transaction=False``.
 
     ``Using`` provides, in short, a way to run queries on a list of models using a manually specified database.
 
