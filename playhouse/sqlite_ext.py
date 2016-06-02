@@ -805,6 +805,9 @@ class SqliteQueryCompiler(QueryCompiler):
                 option.glue = '='
                 columns_constraints.nodes.append(option)
 
+        if getattr(model_class._meta, 'without_rowid', None):
+            clause.nodes.append(SQL('WITHOUT ROWID'))
+
         return clause
 
     def clean_options(self, model_class, clause, extra_options):
@@ -846,6 +849,7 @@ class SqliteExtDatabase(SqliteDatabase):
         self._extensions = set([])
         self._row_factory = None
         if _c_ext and c_extensions:
+            self._using_c_extensions = True
             self.register_function(_c_ext.peewee_date_part, 'date_part', 2)
             self.register_function(_c_ext.peewee_date_trunc, 'date_trunc', 2)
             self.register_function(_c_ext.peewee_regexp, 'regexp', 2)
@@ -854,11 +858,16 @@ class SqliteExtDatabase(SqliteDatabase):
             self.register_function(_c_ext.peewee_bm25, 'fts_bm25', -1)
             self.register_function(_c_ext.peewee_murmurhash, 'murmurhash', 1)
         else:
+            self._using_c_extensions = False
             self.register_function(_sqlite_date_part, 'date_part', 2)
             self.register_function(_sqlite_date_trunc, 'date_trunc', 2)
             self.register_function(_sqlite_regexp, 'regexp', 2)
             self.register_function(rank, 'fts_rank', -1)
             self.register_function(bm25, 'fts_bm25', -1)
+
+    @property
+    def using_c_extensions(self):
+        return self._using_c_extensions
 
     def _add_conn_hooks(self, conn):
         self._set_pragmas(conn)

@@ -16,6 +16,7 @@
 #     //
 #    '
 
+import calendar
 import datetime
 import decimal
 import hashlib
@@ -24,7 +25,9 @@ import operator
 import re
 import sys
 import threading
+import time
 import uuid
+import weakref
 from bisect import bisect_left
 from bisect import bisect_right
 from collections import deque
@@ -37,7 +40,7 @@ from copy import deepcopy
 from functools import wraps
 from inspect import isclass
 
-__version__ = '2.8.0'
+__version__ = '2.8.1'
 __all__ = [
     'BareField',
     'BigIntegerField',
@@ -86,6 +89,7 @@ __all__ = [
     'SQL',
     'TextField',
     'TimeField',
+    'TimestampField',
     'Using',
     'UUIDField',
     'Window',
@@ -122,6 +126,7 @@ if PY3:
     basestring = str
     print_ = getattr(builtins, 'print')
     binary_construct = lambda s: bytes(s.encode('raw_unicode_escape'))
+    long = int
     def reraise(tp, value, tb=None):
         if value.__traceback__ is not tb:
             raise value.with_traceback(tb)
@@ -136,6 +141,12 @@ elif PY2:
     exec('def reraise(tp, value, tb=None): raise tp, value, tb')
 else:
     raise RuntimeError('Unsupported python version.')
+
+if PY26:
+    _M = 10**6
+    total_seconds = lambda t: (t.microseconds + 0.0 + (t.seconds + t.days * 24 * 3600) * _M) / _M
+else:
+    total_seconds = lambda t: t.total_seconds()
 
 # By default, peewee supports Sqlite, MySQL and Postgresql.
 try:
@@ -649,13 +660,13 @@ class Param(Node):
     """
     _node_type = 'param'
 
-    def __init__(self, value, conv=None):
+    def __init__(self, value, adapt=None):
         self.value = value
-        self.conv = conv
+        self.adapt = adapt
         super(Param, self).__init__()
 
     def clone_base(self):
-        return Param(self.value, self.conv)
+        return Param(self.value, self.adapt)
 
 class Passthrough(Param):
     _node_type = 'passthrough'
@@ -1078,8 +1089,12 @@ class BlobField(Field):
     _constructor = binary_construct
 
     def add_to_class(self, model_class, name):
-        self._constructor = model_class._meta.database.get_binary_type()
+        if isinstance(model_class._meta.database, Proxy):
+            model_class._meta.database.attach_callback(self._set_constructor)
         return super(BlobField, self).add_to_class(model_class, name)
+
+    def _set_constructor(self, database):
+        self._constructor = database.get_binary_type()
 
     def db_value(self, value):
         if isinstance(value, unicode_type):
@@ -1186,6 +1201,60 @@ class TimeField(_BaseFormattedField):
     minute = property(_date_part('minute'))
     second = property(_date_part('second'))
 
+class TimestampField(IntegerField):
+    # Support second -> microsecond resolution.
+    valid_resolutions = [10**i for i in range(7)]
+
+    def __init__(self, *args, **kwargs):
+        self.resolution = kwargs.pop('resolution', 1) or 1
+        if self.resolution not in self.valid_resolutions:
+            raise ValueError('TimestampField resolution must be one of: %s' %
+                             ', '.join(str(i) for i in self.valid_resolutions))
+
+        self.utc = kwargs.pop('utc', False) or False
+        if self.utc:
+            _conv = datetime.datetime.utcfromtimestamp
+            self.adapt = lambda v: _conv(float(v) / self.resolution)
+            default = datetime.datetime.utcnow
+        else:
+            self.adapt = datetime.datetime.fromtimestamp
+            default = datetime.datetime.now
+
+        kwargs.setdefault('default', default)
+        super(TimestampField, self).__init__(*args, **kwargs)
+
+    def get_db_field(self):
+        # For second resolution we can get away (for a while) with using
+        # 4 bytes to store the timestamp (as long as they're not > ~2038).
+        # Otherwise we'll need to use a BigInteger type.
+        return (self.db_field if self.resolution == 1
+                else BigIntegerField.db_field)
+
+    def db_value(self, value):
+        if value is None:
+            return
+
+        if isinstance(value, datetime.datetime):
+            pass
+        elif isinstance(value, datetime.date):
+            value = datetime.datetime(value.year, value.month, value.day)
+        else:
+            return value
+
+        if self.utc:
+            timestamp = calendar.timegm(value.utctimetuple())
+        else:
+            timestamp = time.mktime(value.timetuple())
+        timestamp += (value.microsecond * .000001)
+        if self.resolution > 1:
+            timestamp *= self.resolution
+        return int(round(timestamp))
+
+    def python_value(self, value):
+        if value is not None and isinstance(value, (int, float, long)):
+            return self.adapt(value)
+        return value
+
 class BooleanField(Field):
     db_field = 'bool'
     coerce = bool
@@ -1240,10 +1309,12 @@ class ObjectIdDescriptor(object):
     """Gives direct access to the underlying id"""
     def __init__(self, field):
         self.attr_name = field.name
+        self.field = weakref.ref(field)
 
     def __get__(self, instance, instance_type=None):
         if instance is not None:
             return instance._data.get(self.attr_name)
+        return self.field()
 
     def __set__(self, instance, value):
         setattr(instance, self.attr_name, value)
@@ -1285,6 +1356,8 @@ class ForeignKeyField(IntegerField):
         return ReverseRelationDescriptor(self)
 
     def _get_related_name(self):
+        if self._related_name and callable(self._related_name):
+            return self._related_name(self)
         return self._related_name or ('%s_set' % self.model_class._meta.name)
 
     def add_to_class(self, model_class, name):
@@ -1501,7 +1574,7 @@ class QueryCompiler(object):
         return {
             'expression': self._parse_expression,
             'param': self._parse_param,
-            'passthrough': self._parse_param,
+            'passthrough': self._parse_passthrough,
             'func': self._parse_func,
             'clause': self._parse_clause,
             'entity': self._parse_entity,
@@ -1536,12 +1609,20 @@ class QueryCompiler(object):
         sql = template % (lhs, self.get_op(node.op), rhs)
         return sql, lparams + rparams
 
+    def _parse_passthrough(self, node, alias_map, conv):
+        if node.adapt:
+            return self.parse_node(node.adapt(node.value), alias_map, None)
+        return self.interpolation, [node.value]
+
     def _parse_param(self, node, alias_map, conv):
-        if node.conv:
-            params = [node.conv(node.value)]
+        if node.adapt:
+            if conv and conv.db_value is node.adapt:
+                conv = None
+            return self.parse_node(node.adapt(node.value), alias_map, conv)
+        elif conv is not None:
+            return self.parse_node(conv.db_value(node.value), alias_map)
         else:
-            params = [node.value]
-        return self.interpolation, params
+            return self.interpolation, [node.value]
 
     def _parse_func(self, node, alias_map, conv):
         conv = node._coerce and conv or None
@@ -1623,7 +1704,9 @@ class QueryCompiler(object):
         unknown = False
         if node_type in self._parse_map:
             sql, params = self._parse_map[node_type](node, alias_map, conv)
-            unknown = node_type in self._unknown_types
+            unknown = (node_type in self._unknown_types and
+                       node.adapt is None and
+                       conv is None)
         elif isinstance(node, (list, tuple)):
             # If you're wondering how to pass a list into your query, simply
             # wrap it in Param().
@@ -1641,15 +1724,18 @@ class QueryCompiler(object):
                 isinstance(node, ModelAlias):
             entity = node.as_entity().alias(alias_map[node])
             sql, params = self.parse_node(entity, alias_map, conv)
+        elif conv is not None:
+            value = conv.db_value(node)
+            sql, params, _ = self._parse(value, alias_map, None)
         else:
-            sql, params = self._parse_default(node, alias_map, conv)
+            sql, params = self._parse_default(node, alias_map, None)
             unknown = True
 
         return sql, params, unknown
 
     def parse_node(self, node, alias_map=None, conv=None):
         sql, params, unknown = self._parse(node, alias_map, conv)
-        if unknown and conv and params:
+        if unknown and (conv is not None) and params:
             params = [conv.db_value(i) for i in params]
 
         if isinstance(node, Node):
@@ -1659,6 +1745,14 @@ class QueryCompiler(object):
                 sql = ' '.join((sql, 'AS', node._alias))
             if node._ordering:
                 sql = ' '.join((sql, node._ordering))
+
+        if params and any(isinstance(p, Node) for p in params):
+            clean_params = []
+            clean_sql = []
+            for idx, param in enumerate(params):
+                if isinstance(param, Node):
+                    csql, cparams = self.parse_node(param)
+
         return sql, params
 
     def parse_node_list(self, nodes, alias_map, conv=None, glue=', '):
@@ -1818,7 +1912,7 @@ class QueryCompiler(object):
         update = []
         for field, value in self._sorted_fields(query._update):
             if not isinstance(value, (Node, Model)):
-                value = Param(value, conv=field.db_value)
+                value = Param(value, adapt=field.db_value)
             update.append(Expression(
                 field.as_entity(with_table=False),
                 OP.EQ,
@@ -1873,7 +1967,7 @@ class QueryCompiler(object):
                 for field in fields:
                     value = row_dict[field]
                     if not isinstance(value, (Node, Model)):
-                        value = Param(value, conv=field.db_value)
+                        value = Param(value, adapt=field.db_value)
                     values.append(value)
 
                 value_clauses.append(EnclosedClause(*values))
@@ -2002,7 +2096,7 @@ class QueryCompiler(object):
         index = '%s_%s' % (table, '_'.join(columns))
         if len(index) > 64:
             index_hash = hashlib.md5(index.encode('utf-8')).hexdigest()
-            index = '%s_%s' % (table, index_hash)
+            index = '%s_%s' % (table[:55], index_hash[:8])  # 55 + 1 + 8 = 64
         return index
 
     def _create_index(self, model_class, fields, unique, *extra):
@@ -2985,6 +3079,16 @@ class SelectQuery(Query):
         def __hash__(self):
             return id(self)
 
+class NoopSelectQuery(SelectQuery):
+    def sql(self):
+        return (self.database.get_noop_sql(), ())
+
+    def get_query_meta(self):
+        return None, None
+
+    def _get_result_wrapper(self):
+        return self.database.get_result_wrapper(RESULTS_TUPLES)
+
 class CompoundSelect(SelectQuery):
     _node_type = 'compound_select_query'
 
@@ -3623,8 +3727,11 @@ class Database(object):
     def default_insert_clause(self, model_class):
         return SQL('DEFAULT VALUES')
 
+    def get_noop_sql(self):
+        return 'SELECT 0 WHERE 0'
+
     def get_binary_type(self):
-        return binary_constructor
+        return binary_construct
 
 class SqliteDatabase(Database):
     compiler_class = SqliteQueryCompiler
@@ -3651,6 +3758,8 @@ class SqliteDatabase(Database):
         super(SqliteDatabase, self).__init__(database, *args, **kwargs)
 
     def _connect(self, database, **kwargs):
+        if not sqlite3:
+            raise ImproperlyConfigured('pysqlite or sqlite3 must be installed.')
         conn = sqlite3.connect(database, **kwargs)
         conn.isolation_level = None
         try:
@@ -3885,6 +3994,9 @@ class PostgresqlDatabase(Database):
         path_params = ','.join(['%s'] * len(search_path))
         self.execute_sql('SET search_path TO %s' % path_params, search_path)
 
+    def get_noop_sql(self):
+        return 'SELECT 0 WHERE false'
+
     def get_binary_type(self):
         return psycopg2.Binary
 
@@ -3976,6 +4088,9 @@ class MySQLDatabase(Database):
         return Clause(
             EnclosedClause(model_class._meta.primary_key),
             SQL('VALUES (DEFAULT)'))
+
+    def get_noop_sql(self):
+        return 'DO 0'
 
     def get_binary_type(self):
         return mysql.Binary
@@ -4673,6 +4788,10 @@ class Model(with_metaclass(BaseModel)):
         if cls._meta.schema:
             return Entity(cls._meta.schema, cls._meta.db_table)
         return Entity(cls._meta.db_table)
+
+    @classmethod
+    def noop(cls, *args, **kwargs):
+        return NoopSelectQuery(cls, *args, **kwargs)
 
     def _get_pk_value(self):
         return getattr(self, self._meta.primary_key.name)

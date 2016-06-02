@@ -17,7 +17,7 @@ from playhouse.tests.base import database_initializer
 from playhouse.tests.base import ModelTestCase
 from playhouse.tests.base import PeeweeTestCase
 from playhouse.tests.base import skip_if
-from playhouse.tests.models import TestingID
+from playhouse.tests.models import TestingID as _TestingID
 
 
 class TestPostgresqlExtDatabase(PostgresqlExtDatabase):
@@ -104,11 +104,16 @@ class Post(BaseModel):
     content = TextField()
     timestamp = DateTimeField(default=datetime.datetime.now)
 
+class TestingID(_TestingID):
+    class Meta:
+        database = test_db
+
 MODELS = [
     Testing,
     TestingID,
     ArrayModel,
     FTSModel,
+    NormalModel,
 ]
 
 class BasePostgresqlExtTestCase(ModelTestCase):
@@ -1015,3 +1020,8 @@ class TestIndexedField(PeeweeTestCase):
             'CREATE INDEX "testindexmodel_fake_index_with_type" '
             'ON "testindexmodel" '
             'USING MAGIC ("fake_index_with_type")'))
+
+
+if __name__ == '__main__':
+    import unittest
+    unittest.main(argv=sys.argv)
