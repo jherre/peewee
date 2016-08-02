@@ -54,7 +54,8 @@ from peewee import Entity
 from peewee import Expression
 from peewee import Node
 from peewee import OP
-from peewee import QueryCompiler
+from peewee import SqliteQueryCompiler
+from peewee import _AutoPrimaryKeyField
 from peewee import sqlite3  # Import the best SQLite version.
 from peewee import transaction
 from peewee import _sqlite_date_part
@@ -75,31 +76,17 @@ FTS_VER = sqlite3.sqlite_version_info[:3] >= (3, 7, 4) and 'FTS4' or 'FTS3'
 FTS5_MIN_VERSION = (3, 9, 0)
 
 
-class RowIDField(PrimaryKeyField):
+class RowIDField(_AutoPrimaryKeyField):
     """
     Field used to access hidden primary key on FTS5 or any other SQLite
     table that does not have a separately-defined primary key.
     """
-    def add_to_class(self, model_class, name):
-        if name != 'rowid':
-            raise ValueError('RowIDField must be named `rowid`.')
-        super(RowIDField, self).add_to_class(model_class, name)
-
-        # The `rowid` field should not ever be declared as part of a DDL
-        # or INSERT statement.
-        model_class._meta.remove_field(name)
+    _column_name = 'rowid'
 
 
-class DocIDField(PrimaryKeyField):
+class DocIDField(_AutoPrimaryKeyField):
     """Field used to access hidden primary key on FTS3/4 tables."""
-    def add_to_class(self, model_class, name):
-        if name != 'docid':
-            raise ValueError('DocIDField must be named `docid`.')
-        super(DocIDField, self).add_to_class(model_class, name)
-
-        # The `docid` field should not ever be declared as part of a DDL
-        # or INSERT statement.
-        model_class._meta.remove_field(name)
+    _column_name = 'docid'
 
 
 class PrimaryKeyAutoIncrementField(PrimaryKeyField):
@@ -351,7 +338,7 @@ class FTSModel(BaseFTSModel):
             rank = score_fn()
         elif isinstance(weights, dict):
             weight_args = []
-            for field in cls._meta.sorted_fields:
+            for field in cls._meta.declared_fields:
                 weight_args.append(
                     weights.get(field, weights.get(field.name, 1.0)))
             rank = score_fn(*weight_args)
@@ -492,7 +479,7 @@ class FTS5Model(BaseFTSModel):
         if cls._meta.primary_key.name != 'rowid':
             raise ImproperlyConfigured(cls._error_messages['pk'])
         for field in cls._meta.fields.values():
-            if not isinstance(field, SearchField):
+            if not isinstance(field, (SearchField, RowIDField)):
                 raise ImproperlyConfigured(cls._error_messages['field_type'])
         if cls._meta.indexes:
             raise ImproperlyConfigured(cls._error_messages['index'])
@@ -595,7 +582,7 @@ class FTS5Model(BaseFTSModel):
             rank = SQL('rank')
         elif isinstance(weights, dict):
             weight_args = []
-            for field in cls._meta.sorted_fields:
+            for field in cls._meta.declared_fields:
                 weight_args.append(
                     weights.get(field, weights.get(field.name, 1.0)))
             rank = fn.bm25(cls.as_entity(), *weight_args)
@@ -752,12 +739,12 @@ def ClosureTable(model_class, foreign_key=None):
     return type(name, (BaseClosureTable,), {'Meta': Meta})
 
 
-class SqliteQueryCompiler(QueryCompiler):
+class SqliteExtQueryCompiler(SqliteQueryCompiler):
     """
     Subclass of QueryCompiler that can be used to construct virtual tables.
     """
     def _create_table(self, model_class, safe=False, options=None):
-        clause = super(SqliteQueryCompiler, self)._create_table(
+        clause = super(SqliteExtQueryCompiler, self)._create_table(
             model_class, safe=safe)
 
         if issubclass(model_class, VirtualModel):
@@ -839,7 +826,7 @@ class SqliteExtDatabase(SqliteDatabase):
     * Specify a row factory
     * Advanced transactions (specify isolation level)
     """
-    compiler_class = SqliteQueryCompiler
+    compiler_class = SqliteExtQueryCompiler
 
     def __init__(self, database, c_extensions=True, *args, **kwargs):
         super(SqliteExtDatabase, self).__init__(database, *args, **kwargs)

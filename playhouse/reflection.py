@@ -417,10 +417,14 @@ class Introspector(object):
 
     def make_model_name(self, table):
         model = re.sub('[^\w]+', '', table)
-        return ''.join(sub.title() for sub in model.split('_'))
+        model_name = ''.join(sub.title() for sub in model.split('_'))
+        if not model_name[0].isalpha():
+            model_name = 'T' + model_name
+        return model_name
 
     def make_column_name(self, column):
-        column = re.sub('_id$', '', column.lower()) or column.lower()
+        column = re.sub('_id$', '', column.lower().strip()) or column.lower()
+        column = re.sub('[^\w]+', '_', column)
         if column in RESERVED_WORDS:
             column += '_'
         return column

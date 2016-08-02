@@ -1017,9 +1017,13 @@ Query Types
                 .group_by(User)
                 .having(fn.Count(Tweet.id) > 100))
 
-    .. py:method:: order_by(*clauses)
+    .. py:method:: order_by(*clauses[, extend=False])
 
-        :param clauses: a list of fields, calls to ``field.[asc|desc]()`` or one or more expressions
+        :param clauses: a list of fields, calls to ``field.[asc|desc]()`` or
+          one or more expressions. If called without any arguments, any
+          pre-existing ``ORDER BY`` clause will be removed.
+        :param extend: When called with ``extend=True``, Peewee will append any
+          to the pre-existing ``ORDER BY`` rather than overwriting it.
         :rtype: :py:class:`SelectQuery`
 
         Example of ordering users by username:
@@ -1062,6 +1066,17 @@ Query Types
                 .join(Tweet)
                 .group_by(User)
                 .order_by(tweet_ct.desc(), User.username))
+
+        Example of removing a pre-existing ``ORDER BY`` clause:
+
+        .. code-block:: python
+
+            # Query will be ordered by username.
+            users = User.select().order_by(User.username)
+
+            # Query will be returned in whatever order database chooses.
+            unordered_users = users.order_by()
+
 
     .. py:method:: window(*windows)
 
@@ -1344,12 +1359,34 @@ Query Types
 
             user = User.get(User.active == True, User.username == username)
 
-    .. py:method:: first()
+    .. py:method:: first([n=1])
 
-        :rtype: :py:class:`Model` instance or ``None`` if no results
+        :param int n: Return the first *n* query results after applying a limit
+            of ``n`` records.
+        :rtype: :py:class:`Model` instance, list or ``None`` if no results
 
-        Fetch the first row from a query. The result will be cached in case the entire
-        query result-set should be iterated later.
+        Fetch the first *n* rows from a query. Behind-the-scenes, a ``LIMIT n``
+        is applied. The results of the query are then cached on the query
+        result wrapper so subsequent calls to :py:meth:`~SelectQuery.first`
+        will not cause multiple queries.
+
+        If only one row is requested (default behavior), then the return-type
+        will be either a model instance or ``None``.
+
+        If multiple rows are requested, the return type will either be a list
+        of one to n model instances, or ``None`` if no results are found.
+
+    .. py:method:: peek([n=1])
+
+        :param int n: Return the first *n* query results.
+        :rtype: :py:class:`Model` instance, list or ``None`` if no results
+
+        Fetch the first *n* rows from a query. No ``LIMIT`` is applied to the
+        query, so the :py:meth:`~SelectQuery.peek` has slightly different
+        semantics from :py:meth:`~SelectQuery.first`, which ensures no more
+        than *n* rows are requested. The ``peek`` method, on the other hand,
+        retains the ability to fetch the entire result set withouth issuing
+        additional queries.
 
     .. py:method:: execute()
 
@@ -1373,7 +1410,10 @@ Query Types
 
         Return the number of items in the result set of this query. If all you need is the count of items and do not intend to do anything with the results, call :py:meth:`~SelectQuery.count`.
 
-        .. warning:: The ``SELECT`` query will be executed and the result set will be loaded.
+        .. warning::
+            The ``SELECT`` query will be executed and the result set will be loaded.
+            If you want to obtain the number of results without also loading
+            the query, use :py:meth:`~SelectQuery.count`.
 
     .. py:method:: __getitem__(value)
 

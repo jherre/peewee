@@ -243,6 +243,12 @@ class TestQueryingModels(ModelTestCase):
 
         self.assertEqual(User.select().count(), 4)
 
+    def test_insert_many_validates_fields_by_default(self):
+        self.assertTrue(User.insert_many([])._validate_fields)
+
+    def test_insert_many_without_field_validation(self):
+        self.assertFalse(User.insert_many([], validate_fields=False)._validate_fields)
+
     def test_delete(self):
         User.create_users(5)
         dq = User.delete().where(User.username << ['u1', 'u2', 'u3'])
@@ -873,34 +879,59 @@ class TestModelAPIs(ModelTestCase):
         self.assertEqual(nm_get.data, nm.data)
         self.assertEqual(NonIntModel.select().count(), 1)
 
-    def test_first(self):
-        users = User.create_users(5)
+    def test_peek(self):
+        users = User.create_users(3)
 
         with self.assertQueryCount(1):
             sq = User.select().order_by(User.username)
-            qr = sq.execute()
+
+            # call it once
+            u1 = sq.peek()
+            self.assertEqual(u1.username, 'u1')
+
+            # check the result cache
+            self.assertEqual(len(sq._qr._result_cache), 1)
+
+            # call it again and we get the same result, but not an
+            # extra query
+            self.assertEqual(sq.peek().username, 'u1')
+
+        with self.assertQueryCount(0):
+            # no limit is applied.
+            usernames = [u.username for u in sq]
+            self.assertEqual(usernames, ['u1', 'u2', 'u3'])
+
+    def test_first(self):
+        users = User.create_users(3)
+
+        with self.assertQueryCount(1):
+            sq = User.select().order_by(User.username)
 
             # call it once
             first = sq.first()
             self.assertEqual(first.username, 'u1')
 
             # check the result cache
-            self.assertEqual(len(qr._result_cache), 1)
+            self.assertEqual(len(sq._qr._result_cache), 1)
 
             # call it again and we get the same result, but not an
             # extra query
             self.assertEqual(sq.first().username, 'u1')
 
         with self.assertQueryCount(0):
+            # also note that a limit has been applied.
+            all_results = [obj for obj in sq]
+            self.assertEqual(all_results, [first])
+
             usernames = [u.username for u in sq]
-            self.assertEqual(usernames, ['u1', 'u2', 'u3', 'u4', 'u5'])
+            self.assertEqual(usernames, ['u1'])
 
         with self.assertQueryCount(0):
-            # call after iterating
+            # call first() after iterating
             self.assertEqual(sq.first().username, 'u1')
 
             usernames = [u.username for u in sq]
-            self.assertEqual(usernames, ['u1', 'u2', 'u3', 'u4', 'u5'])
+            self.assertEqual(usernames, ['u1'])
 
         # call it with an empty result
         sq = User.select().where(User.username == 'not-here')
@@ -1729,6 +1760,36 @@ class TestModelInheritance(ModelTestCase):
         self.assertEqual(b2_from_db.user, u)
         self.assertEqual(b2_from_db.extra_field, 'foo')
 
+    def test_inheritance_primary_keys(self):
+        self.assertFalse(hasattr(Model, 'id'))
+
+        class M1(Model): pass
+        self.assertTrue(hasattr(M1, 'id'))
+
+        class M2(Model):
+            key = CharField(primary_key=True)
+        self.assertFalse(hasattr(M2, 'id'))
+
+        class M3(Model):
+            id = TextField()
+            key = IntegerField(primary_key=True)
+        self.assertTrue(hasattr(M3, 'id'))
+        self.assertFalse(M3.id.primary_key)
+
+        class C1(M1): pass
+        self.assertTrue(hasattr(C1, 'id'))
+        self.assertTrue(C1.id.model_class is C1)
+
+        class C2(M2): pass
+        self.assertFalse(hasattr(C2, 'id'))
+        self.assertTrue(C2.key.primary_key)
+        self.assertTrue(C2.key.model_class is C2)
+
+        class C3(M3): pass
+        self.assertTrue(hasattr(C3, 'id'))
+        self.assertFalse(C3.id.primary_key)
+        self.assertTrue(C3.id.model_class is C3)
+
 
 class TestAliasBehavior(ModelTestCase):
     requires = [UpperModel]
@@ -2074,3 +2135,76 @@ class TestDeleteNullableForeignKeys(ModelTestCase):
         self.assertEqual(nf2.delete_instance(), 1)
         self.assertEqual(nf3.delete_instance(), 1)
         self.assertEqual(nf4.delete_instance(), 1)
+
+
+class TestJoinNullableForeignKey(ModelTestCase):
+    requires = [Parent, Orphan, Child]
+
+    def setUp(self):
+        super(TestJoinNullableForeignKey, self).setUp()
+
+        p1 = Parent.create(data='p1')
+        p2 = Parent.create(data='p2')
+        for i in range(1, 3):
+            Child.create(parent=p1, data='child%s-p1' % i)
+            Child.create(parent=p2, data='child%s-p2' % i)
+            Orphan.create(parent=p1, data='orphan%s-p1' % i)
+
+        Orphan.create(data='orphan1-noparent')
+        Orphan.create(data='orphan2-noparent')
+
+    def test_no_empty_instances(self):
+        with self.assertQueryCount(1):
+            query = (Orphan
+                     .select(Orphan, Parent)
+                     .join(Parent, JOIN.LEFT_OUTER)
+                     .order_by(Orphan.id))
+            res = [(orphan.data, orphan.parent is None) for orphan in query]
+
+        self.assertEqual(res, [
+            ('orphan1-p1', False),
+            ('orphan2-p1', False),
+            ('orphan1-noparent', True),
+            ('orphan2-noparent', True),
+        ])
+
+    def test_unselected_fk_pk(self):
+        with self.assertQueryCount(1):
+            query = (Orphan
+                     .select(Orphan.data, Parent.data)
+                     .join(Parent, JOIN.LEFT_OUTER)
+                     .order_by(Orphan.id))
+            res = [(orphan.data, orphan.parent is None) for orphan in query]
+
+        self.assertEqual(res, [
+            ('orphan1-p1', False),
+            ('orphan2-p1', False),
+            ('orphan1-noparent', False),
+            ('orphan2-noparent', False),
+        ])
+
+    def test_non_null_fk_unselected_fk(self):
+        with self.assertQueryCount(1):
+            query = (Child
+                     .select(Child.data, Parent.data)
+                     .join(Parent, JOIN.LEFT_OUTER)
+                     .order_by(Child.id))
+            res = [(child.data, child.parent is None) for child in query]
+
+        self.assertEqual(res, [
+            ('child1-p1', False),
+            ('child1-p2', False),
+            ('child2-p1', False),
+            ('child2-p2', False),
+        ])
+
+        res = [child.parent.data for child in query]
+        self.assertEqual(res, ['p1', 'p2', 'p1', 'p2'])
+
+        res = [(child._data['parent'], child.parent.id) for child in query]
+        self.assertEqual(res, [
+            (None, None),
+            (None, None),
+            (None, None),
+            (None, None),
+        ])
