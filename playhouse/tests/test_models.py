@@ -31,6 +31,20 @@ class GCModel(Model):
             (('key', 'value'), True),
         )
 
+def incrementer():
+    d = {'value': 0}
+    def increment():
+        d['value'] += 1
+        return d['value']
+    return increment
+
+class DefaultsModel(Model):
+    field = IntegerField(default=incrementer())
+    control = IntegerField(default=1)
+
+    class Meta:
+        database = in_memory_db
+
 
 class TestQueryingModels(ModelTestCase):
     requires = [User, Blog]
@@ -525,6 +539,26 @@ class TestModelAPIs(ModelTestCase):
         with self.assertQueryCount(1):
             self.assertEqual(result.user.id, u.id)
 
+    def test_object_id_descriptor_naming(self):
+        class Person(Model):
+            pass
+
+        class Foo(Model):
+            me = ForeignKeyField(Person, db_column='me', related_name='foo1')
+            another = ForeignKeyField(Person, db_column='_whatever_',
+                                      related_name='foo2')
+            another2 = ForeignKeyField(Person, db_column='person_id',
+                                       related_name='foo3')
+            plain = ForeignKeyField(Person, related_name='foo4')
+
+        self.assertTrue(Foo.me is Foo.me_id)
+        self.assertTrue(Foo.another is Foo._whatever_)
+        self.assertTrue(Foo.another2 is Foo.person_id)
+        self.assertTrue(Foo.plain is Foo.plain_id)
+
+        self.assertRaises(AttributeError, lambda: Foo.another_id)
+        self.assertRaises(AttributeError, lambda: Foo.another2_id)
+
     def test_category_select_related_alias(self):
         g1 = Category.create(name='g1')
         g2 = Category.create(name='g2')
@@ -677,7 +711,7 @@ class TestModelAPIs(ModelTestCase):
                 u = User.create(username='u1')
                 b = Blog.create(title='b1', user=u)
 
-            # The default value for the blog title will be saved as well.
+            # The default value for the blog content will be saved as well.
             self.assertEqual(
                 [params for _, params in query_logger.queries],
                 [['u1'], [u.id, 'b1', '']])
@@ -2208,3 +2242,69 @@ class TestJoinNullableForeignKey(ModelTestCase):
             (None, None),
             (None, None),
         ])
+
+
+class TestDefaultDirtyBehavior(PeeweeTestCase):
+    def setUp(self):
+        super(TestDefaultDirtyBehavior, self).setUp()
+        DefaultsModel.drop_table(True)
+        DefaultsModel.create_table()
+
+    def test_default_dirty(self):
+        DM = DefaultsModel
+        DM._meta.only_save_dirty = True
+
+        dm = DM()
+        dm.save()
+
+        self.assertEqual(dm.field, 1)
+        self.assertEqual(dm.control, 1)
+
+        dm_db = DM.get((DM.field == 1) & (DM.control == 1))
+        self.assertEqual(dm_db.field, 1)
+        self.assertEqual(dm_db.control, 1)
+
+        # No changes.
+        self.assertFalse(dm_db.save())
+
+        dm2 = DM.create()
+        self.assertEqual(dm2.field, 3)  # One extra when fetched from DB.
+        self.assertEqual(dm2.control, 1)
+
+        dm._meta.only_save_dirty = False
+
+        dm3 = DM()
+        self.assertEqual(dm3.field, 4)
+        self.assertEqual(dm3.control, 1)
+        dm3.save()
+
+        dm3_db = DM.get(DM.id == dm3.id)
+        self.assertEqual(dm3_db.field, 4)
+
+
+class TestFunctionCoerceRegression(PeeweeTestCase):
+    def test_function_coerce(self):
+        class M1(Model):
+            data = IntegerField()
+            class Meta:
+                database = in_memory_db
+
+        class M2(Model):
+            id = IntegerField()
+            class Meta:
+                database = in_memory_db
+
+        in_memory_db.create_tables([M1, M2])
+
+        for i in range(3):
+            M1.create(data=i)
+            M2.create(id=i + 1)
+
+        qm1 = M1.select(fn.GROUP_CONCAT(M1.data).coerce(False).alias('data'))
+        qm2 = M2.select(fn.GROUP_CONCAT(M2.id).coerce(False).alias('ids'))
+
+        m1 = qm1.get()
+        self.assertEqual(m1.data, '0,1,2')
+
+        m2 = qm2.get()
+        self.assertEqual(m2.ids, '1,2,3')

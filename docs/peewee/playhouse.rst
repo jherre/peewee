@@ -61,7 +61,7 @@ sqlite_ext API notes
 
 .. py:class:: SqliteExtDatabase(database, pragmas=(), c_extensions=True, **kwargs)
 
-    :param pragmas: A list of 2-tuples containing ``PRAGMA`` settings to configure on a per-connection basis.
+    :param pragmas: A list or tuple of 2-tuples containing ``PRAGMA`` settings to configure on a per-connection basis.
     :param bool c_extensions: Boolean flag indicating whether to use the fast implementations of various SQLite user-defined functions. If Cython was installed when you built ``peewee``, then these functions should be available. If not, Peewee will fall back to using the slower pure-Python functions.
 
     Subclass of the :py:class:`SqliteDatabase` that provides some advanced features only offered by Sqlite.
@@ -1177,7 +1177,7 @@ Example:
             db.get_tables()
         except DatabaseError as exc:
             # We only allow a specific [somewhat cryptic] error message.
-            if exc.message != 'file is encrypted or is not a database':
+            if exc.args[0] != 'file is encrypted or is not a database':
                 raise exc
             else:
                 tell_user_the_passphrase_was_wrong()
@@ -4005,7 +4005,7 @@ Contains utilities helpful when testing peewee projects.
     using a "test-only" database.
 
     :param Database db: Database to use with the given models
-    :param models: a ``list`` of :py:class:`Model` classes to use with the ``db``
+    :param models: a ``list`` or ``tuple`` of :py:class:`Model` classes to use with the ``db``
     :param boolean create_tables: Whether tables should be automatically created
         and dropped.
     :param boolean fail_silently: Whether the table create / drop should fail
@@ -4036,6 +4036,10 @@ Contains utilities helpful when testing peewee projects.
 
                     # Perform assertions on test data inside ctx manager.
                     self.assertEqual(Tweet.timeline('user-0') [...])
+
+                with test_database(test_db, (User,)):
+                    # Test something that just affects user.
+                    self.test_some_user_thing()
 
                 # once we exit the context manager, we're back to using the normal database
 

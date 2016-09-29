@@ -705,6 +705,20 @@ Fields
 
         Same as :py:attr:`~TimeField.hour`, except extract second..
 
+.. py:class:: TimestampField
+
+    Stores: python ``datetime.datetime`` instances (stored as integers)
+
+    Accepts a special parameter ``resolution``, which is a power-of-10 up to
+    ``10^6``. This allows sub-second precision while still using an
+    :py:class:`IntegerField` for storage. Default is ``1`` (second precision).
+
+    Also accepts a boolean parameter ``utc``, used to indicate whether the
+    timestamps should be UTC. Default is ``False``.
+
+    Finally, the field ``default`` is the current timestamp. If you do not want
+    this behavior, then explicitly pass in ``default=None``.
+
 .. py:class:: BooleanField
 
     Stores: ``True`` / ``False``
@@ -2838,6 +2852,13 @@ Misc
     .. py:method:: concat(rhs)
 
         Concatenate the current node with the provided ``rhs``.
+
+        .. warning::
+            In order for this method to work with MySQL, the MySQL session must
+            be set to use ``PIPES_AS_CONCAT``.
+
+            To reliably concatenate strings with MySQL, use
+            ``fn.CONCAT(s1, s2...)`` instead.
 
     .. py:method:: is_null([is_null=True])
 
