@@ -3987,7 +3987,9 @@ class PostgresqlDatabase(Database):
     def _connect(self, database, encoding=None, **kwargs):
         if not psycopg2:
             raise ImproperlyConfigured('psycopg2 must be installed.')
-        conn = psycopg2.connect(database=database, **kwargs)
+        # psycopg2 will not ignore None parameters
+        _kwargs = {k:v for k,v in kwargs.items() if v is not None}
+        conn = psycopg2.connect(database=database, **_kwargs)
         if self.register_unicode:
             pg_extensions.register_type(pg_extensions.UNICODE, conn)
             pg_extensions.register_type(pg_extensions.UNICODEARRAY, conn)
