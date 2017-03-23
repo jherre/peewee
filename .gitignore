@@ -8,6 +8,7 @@ playhouse/tests/peewee_test.db
 .idea/
 MANIFEST
 peewee_test.db
+closure.so
 
 # jherre
 Vagrantfile

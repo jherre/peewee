@@ -144,6 +144,31 @@ class TestSelectQuery(PeeweeTestCase):
             ')))))'))
         self.assertEqual(params, ['1', '2'])
 
+    def test_composite_subselect(self):
+        class Person(Model):
+            first = CharField()
+            last = CharField()
+            class Meta:
+                primary_key = CompositeKey('first', 'last')
+
+        sql, params = compiler.generate_select(Person.select())
+        self.assertEqual(sql, ('SELECT "person"."first", "person"."last" '
+                               'FROM "person" AS person'))
+        self.assertEqual(params, [])
+
+        cond = Person.select() == ('huey', 'cat')
+        class Note(Model):
+            pass
+
+        query = Note.select().where(cond)
+        sql, params = compiler.generate_select(query)
+        self.assertEqual(sql, (
+            'SELECT "note"."id" FROM "note" AS note '
+            'WHERE (('
+            'SELECT "person"."first", "person"."last" '
+            'FROM "person" AS person) = (?, ?))'))
+        self.assertEqual(params, ['huey', 'cat'])
+
     def test_select_cloning(self):
         ct = fn.Count(Blog.pk)
         sq = SelectQuery(User, User, User.id.alias('extra_id'), ct.alias('blog_ct')).join(
@@ -517,6 +542,10 @@ class TestSelectQuery(PeeweeTestCase):
 
         sq = SelectQuery(User).where(~(User.id == 1)).where(User.id == 2).where(~(User.id == 3))
         self.assertWhere(sq, '((NOT ("users"."id" = ?) AND ("users"."id" = ?)) AND NOT ("users"."id" = ?))', [1, 2, 3])
+
+    def test_tuples(self):
+        sq = User.select().where(Tuple(User.id, User.username) == (1, 'hello'))
+        self.assertWhere(sq, '(("users"."id", "users"."username") = (?, ?))', [1, 'hello'])
 
     def test_grouping(self):
         sq = SelectQuery(User).group_by(User.id)
@@ -1666,6 +1695,35 @@ class TestWindowFunctions(ModelTestCase):
         super(TestWindowFunctions, self).setUp()
         for int_v, float_v in self.data:
             NullModel.create(int_field=int_v, float_field=float_v)
+
+    def test_frame(self):
+        query = (NullModel
+                 .select(
+                     NullModel.float_field,
+                     fn.AVG(NullModel.float_field).over(
+                         partition_by=[NullModel.int_field],
+                         start=Window.preceding(),
+                         end=Window.following(2))))
+        sql, params = query.sql()
+        self.assertEqual(sql, (
+            'SELECT "t1"."float_field", AVG("t1"."float_field") '
+            'OVER (PARTITION BY "t1"."int_field" RANGE BETWEEN '
+            'UNBOUNDED PRECEDING AND 2 FOLLOWING) FROM "nullmodel" AS t1'))
+        self.assertEqual(params, [])
+
+        query = (NullModel
+                 .select(
+                     NullModel.float_field,
+                     fn.AVG(NullModel.float_field).over(
+                         partition_by=[NullModel.int_field],
+                         start=SQL('CURRENT ROW'),
+                         end=Window.following())))
+        sql, params = query.sql()
+        self.assertEqual(sql, (
+            'SELECT "t1"."float_field", AVG("t1"."float_field") '
+            'OVER (PARTITION BY "t1"."int_field" RANGE BETWEEN '
+            'CURRENT ROW AND UNBOUNDED FOLLOWING) FROM "nullmodel" AS t1'))
+        self.assertEqual(params, [])
 
     def test_partition_unordered(self):
         query = (NullModel

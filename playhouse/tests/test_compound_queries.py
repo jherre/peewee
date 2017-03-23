@@ -11,6 +11,7 @@ from playhouse.tests.base import database_initializer
 from playhouse.tests.base import log_console
 from playhouse.tests.base import ModelTestCase
 from playhouse.tests.base import PeeweeTestCase
+from playhouse.tests.base import skip_test_if
 from playhouse.tests.base import skip_unless
 from playhouse.tests.base import test_db
 from playhouse.tests.models import *
@@ -162,8 +163,8 @@ class TestCompoundSelectSQL(PeeweeTestCase):
         compound = lhs | queries[2]
         sql, params = compound.sql()
         self.assertEqual(sql, (
-            '((SELECT "t1"."alpha" FROM "alpha" AS t1) UNION '
-            '(SELECT "t2"."alpha" FROM "alpha" AS t2)) UNION '
+            '(SELECT "t1"."alpha" FROM "alpha" AS t1) UNION '
+            '(SELECT "t2"."alpha" FROM "alpha" AS t2) UNION '
             '(SELECT "t3"."alpha" FROM "alpha" AS t3)'))
 
         lhs = queries[0]
@@ -171,8 +172,8 @@ class TestCompoundSelectSQL(PeeweeTestCase):
         sql, params = compound.sql()
         self.assertEqual(sql, (
             '(SELECT "t3"."alpha" FROM "alpha" AS t3) UNION '
-            '((SELECT "t1"."alpha" FROM "alpha" AS t1) UNION '
-            '(SELECT "t2"."alpha" FROM "alpha" AS t2))'))
+            '(SELECT "t1"."alpha" FROM "alpha" AS t1) UNION '
+            '(SELECT "t2"."alpha" FROM "alpha" AS t2)'))
 
     def test_inner_limit(self):
         compound_db.compound_select_parentheses = True
@@ -363,6 +364,7 @@ class TestCompoundSelectQueries(ModelTestCase):
             {'username': 'e'}])
 
     @requires_op('UNION')
+    @skip_test_if(lambda: isinstance(test_db, MySQLDatabase))  # MySQL needs parens, but doesn't like them here.
     def test_union_subquery(self):
         union = (User.select(User.username).where(User.username == 'a') |
                  UniqueModel.select(UniqueModel.name))
