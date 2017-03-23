@@ -3,13 +3,14 @@
 Playhouse, extensions to Peewee
 ===============================
 
-Peewee comes with numerous extrension modules which are collected under the ``playhouse`` namespace. Despite the silly name, there are some very useful extensions, particularly those that expose vendor-specific database features like the :ref:`sqlite_ext` and :ref:`postgres_ext` extensions.
+Peewee comes with numerous extension modules which are collected under the ``playhouse`` namespace. Despite the silly name, there are some very useful extensions, particularly those that expose vendor-specific database features like the :ref:`sqlite_ext` and :ref:`postgres_ext` extensions.
 
 Below you will find a loosely organized listing of the various modules that make up the ``playhouse``.
 
 **Database drivers / vendor-specific database functionality**
 
 * :ref:`sqlite_ext`
+* :ref:`sqliteq`
 * :ref:`sqlite_udf`
 * :ref:`apsw`
 * :ref:`berkeleydb`
@@ -169,31 +170,6 @@ sqlite_ext API notes
     .. py:method:: unload_extension(name):
 
         Unload the given SQLite extension.
-
-    .. py:method:: granular_transaction([lock_type='deferred'])
-
-        With the ``granular_transaction`` helper, you can specify the isolation level
-        for an individual transaction.  The valid options are:
-
-        * ``exclusive``
-        * ``immediate``
-        * ``deferred``
-
-        Example usage:
-
-        .. code-block:: python
-
-            with db.granular_transaction('exclusive'):
-                # no other readers or writers!
-                (Account
-                 .update(Account.balance=Account.balance - 100)
-                 .where(Account.id == from_acct)
-                 .execute())
-
-                (Account
-                 .update(Account.balance=Account.balance + 100)
-                 .where(Account.id == to_acct)
-                 .execute())
 
 
 .. py:class:: VirtualModel
@@ -740,7 +716,7 @@ sqlite_ext API notes
 
 .. _sqlite_closure:
 
-.. py:function:: ClosureTable(model_class[, foreign_key=None])
+.. py:function:: ClosureTable(model_class[, foreign_key=None[, referencing_class=None, referencing_key=None]])
 
     Factory function for creating a model class suitable for working with a `transitive closure <http://www.sqlite.org/cgi/src/artifact/636024302cde41b2bf0c542f81c40c624cfb7012>`_ table. Closure tables are :py:class:`VirtualModel` subclasses that work with the transitive closure SQLite extension. These special tables are designed to make it easy to efficiently query heirarchical data. The SQLite extension manages an AVL tree behind-the-scenes, transparently updating the tree when your table changes and making it easy to perform common queries on heirarchical data.
 
@@ -759,7 +735,7 @@ sqlite_ext API notes
 
            $ gcc -g -fPIC -shared closure.c -o closure.so
 
-    3. Create a model for your heirarchical data. The only requirement here is that the model have an integer primary key and a self-referential foreign key. Any additional fields are fine.
+    3. Create a model for your hierarchical data. The only requirement here is that the model has an integer primary key and a self-referential foreign key. Any additional fields are fine.
 
        .. code-block:: python
 
@@ -771,6 +747,27 @@ sqlite_ext API notes
            # Generate a model for the closure virtual table.
            CategoryClosure = ClosureTable(Category)
 
+       The self-referentiality can also be achieved via an intermediate table (for a many-to-many relation).
+
+       .. code-block:: python
+
+           class User(Model):
+               name = CharField()
+
+           class UserRelations(Model):
+               user = ForeignKeyField(User)
+               knows = ForeignKeyField(User, related_name='_known_by')
+
+               class Meta:
+                   primary_key = CompositeKey('user', 'knows') # Alternatively, a unique index on both columns.
+
+           # Generate a model for the closure virtual table, specifying the UserRelations as the referencing table
+           UserClosure = ClosureTable(
+               User,
+               referencing_class=UserRelations,
+               foreign_key=UserRelations.knows,
+               referencing_key=UserRelations.user)
+
     4. In your application code, make sure you load the extension when you instantiate your :py:class:`Database` object. This is done by passing the path to the shared library to the :py:meth:`~SqliteExtDatabase.load_extension` method.
 
        .. code-block:: python
@@ -780,6 +777,8 @@ sqlite_ext API notes
 
     :param model_class: The model class containing the nodes in the tree.
     :param foreign_key: The self-referential parent-node field on the model class. If not provided, peewee will introspect the model to find a suitable key.
+    :param referencing_class: The intermediate table for a many-to-many relationship.
+    :param referencing_key: For a many-to-many relationship: the originating side of the relation.
     :return: Returns a :py:class:`VirtualModel` for working with a closure table.
 
     .. warning:: There are two caveats you should be aware of when using the ``transitive_closure`` extension. First, it requires that your *source model* have an integer primary key. Second, it is strongly recommended that you create an index on the self-referential foreign key.
@@ -883,6 +882,120 @@ sqlite_ext API notes
             Retrieve all nodes that are children of the specified node's parent.
 
     .. note:: For an in-depth discussion of the SQLite transitive closure extension, check out this blog post, `Querying Tree Structures in SQLite using Python and the Transitive Closure Extension <http://charlesleifer.com/blog/querying-tree-structures-in-sqlite-using-python-and-the-transitive-closure-extension/>`_.
+
+
+.. _sqliteq:
+
+SqliteQ
+-------
+
+The ``playhouse.sqliteq`` module provides a subclass of
+:py:class:`SqliteExtDatabase`, that will serialize concurrent writes to a
+SQLite database. :py:class:`SqliteQueueDatabase` can be used as a drop-in
+replacement for the regular :py:class:`SqliteDatabase` if you want simple
+**read and write** access to a SQLite database from **multiple threads**.
+
+SQLite only allows one connection to write to the database at any given time.
+As a result, if you have a multi-threaded application (like a web-server, for
+example) that needs to write to the database, you may see occasional errors
+when one or more of the threads attempting to write cannot acquire the lock.
+
+:py:class:`SqliteQueueDatabase` is designed to simplify things by sending all
+write queries through a single, long-lived connection. The benefit is that you
+get the appearance of multiple threads writing to the database without
+conflicts or timeouts. The downside, however, is that you cannot issue
+write transactions that encompass multiple queries -- all writes run in
+autocommit mode, essentially.
+
+.. note::
+    The module gets its name from the fact that all write queries get put into
+    a thread-safe queue. A single worker thread listens to the queue and
+    executes all queries that are sent to it.
+
+Transactions
+^^^^^^^^^^^^
+
+Because all queries are serialized and executed by a single worker thread, it
+is possible for transactional SQL from separate threads to be executed
+out-of-order. In the example below, the transaction started by thread "B" is
+rolled back by thread "A" (with bad consequences!):
+
+* Thread A: UPDATE transplants SET organ='liver', ...;
+* Thread B: BEGIN TRANSACTION;
+* Thread B: UPDATE life_support_system SET timer += 60 ...;
+* Thread A: ROLLBACK; -- Oh no....
+
+Since there is a potential for queries from separate transactions to be
+interleaved, the :py:meth:`~SqliteQueueDatabase.transaction` and
+:py:meth:`~SqliteQueueDatabase.atomic` methods are disabled on :py:class:`SqliteQueueDatabase`.
+
+For cases when you wish to temporarily write to the database from a different
+thread, you can use the :py:meth:`~SqliteQueueDatabase.pause` and
+:py:meth:`~SqliteQueueDatabase.unpause` methods. These methods block the
+caller until the writer thread is finished with its current workload. The
+writer then disconnects and the caller takes over until ``unpause`` is called.
+
+The :py:meth:`~SqliteQueueDatabase.stop`, :py:meth:`~SqliteQueueDatabase.start`,
+and :py:meth:`~SqliteQueueDatabase.is_stopped` methods can also be used to
+control the writer thread.
+
+.. note::
+    Take a look at SQLite's `isolation <https://www.sqlite.org/isolation.html>`_
+    documentation for more information about how SQLite handles concurrent
+    connections.
+
+Code sample
+^^^^^^^^^^^
+
+Creating a database instance does not require any special handling. The
+:py:class:`SqliteQueueDatabase` accepts some special parameters which you
+should be aware of, though. If you are using `gevent <http://gevent.org>`_, you
+must specify ``use_gevent=True`` when instantiating your database -- this way
+Peewee will know to use the appropriate objects for handling queueing, thread
+creation, and locking.
+
+.. code-block:: python
+
+    from playhouse.sqliteq import SqliteQueueDatabase
+
+    db = SqliteQueueDatabase(
+        'my_app.db',
+        use_gevent=False,  # Use the standard library "threading" module.
+        autostart=False,  # The worker thread now must be started manually.
+        queue_max_size=64,  # Max. # of pending writes that can accumulate.
+        results_timeout=5.0)  # Max. time to wait for query to be executed.
+
+
+If ``autostart=False``, as in the above example, you will need to call
+:py:meth:`~SqliteQueueDatabase.start` to bring up the worker threads that will
+do the actual write query execution.
+
+.. code-block:: python
+
+    @app.before_first_request
+    def _start_worker_threads():
+        db.start()
+
+If you plan on performing SELECT queries or generally wanting to access the
+database, you will need to call :py:meth:`~Database.connect` and
+:py:meth:`~Database.close` as you would with any other database instance.
+
+When your application is ready to terminate, use the :py:meth:`~SqliteQueueDatabase.stop`
+method to shut down the worker thread. If there was a backlog of work, then
+this method will block until all pending work is finished (though no new work
+is allowed).
+
+.. code-block:: python
+
+    import atexit
+
+    @atexit.register
+    def _stop_worker_threads():
+        db.stop()
+
+
+Lastly, the :py:meth:`~SqliteQueueDatabase.is_stopped` method can be used to
+determine whether the database writer is up and running.
 
 .. _sqlite_udf:
 
@@ -1001,13 +1114,6 @@ apsw_ext API notes
 
     :param string database: filename of sqlite database
     :param connect_kwargs: keyword arguments passed to apsw when opening a connection
-
-    .. py:method:: transaction([lock_type='deferred'])
-
-        Functions just like the :py:meth:`Database.transaction` context manager,
-        but accepts an additional parameter specifying the type of lock to use.
-
-        :param string lock_type: type of lock to use when opening a new transaction
 
     .. py:method:: register_module(mod_name, mod_inst)
 
@@ -3885,13 +3991,14 @@ That's it! If you would like finer-grained control over the pool of connections,
 Pool APIs
 ^^^^^^^^^
 
-.. py:class:: PooledDatabase(database[, max_connections=20[, stale_timeout=None[, **kwargs]]])
+.. py:class:: PooledDatabase(database[, max_connections=20[, stale_timeout=None[, timeout=None[, **kwargs]]]])
 
     Mixin class intended to be used with a subclass of :py:class:`Database`.
 
     :param str database: The name of the database or database file.
     :param int max_connections: Maximum number of connections. Provide ``None`` for unlimited.
     :param int stale_timeout: Number of seconds to allow connections to be used.
+    :param int timeout: Number of seconds block when pool is full. By default peewee does not block when the pool is full but simply throws an exception. To block indefinitely set this value to ``0``.
     :param kwargs: Arbitrary keyword arguments passed to database class.
 
     .. note:: Connections will not be closed exactly when they exceed their `stale_timeout`. Instead, stale connections are only closed when a new connection is requested.
@@ -4156,10 +4263,18 @@ Flask Utils
 
 The ``playhouse.flask_utils`` module contains several helpers for integrating peewee with the `Flask <http://flask.pocoo.org/>`_ web framework.
 
-Database wrapper
+Database Wrapper
 ^^^^^^^^^^^^^^^^
 
-The :py:class:`FlaskDB` class provides a convenient way to configure a peewee :py:class:`Database` instance using Flask app configuration. The :py:class:`FlaskDB` wrapper will also automatically set up request setup and teardown handlers to ensure your connections are managed correctly.
+The :py:class:`FlaskDB` class is a wrapper for configuring and referencing a
+Peewee database from within a Flask application. Don't let it's name fool you:
+it is **not the same thing as a peewee database**. ``FlaskDB`` is designed to
+remove the following boilerplate from your flask app:
+
+* Dynamically create a Peewee database instance based on app config data.
+* Create a base class from which all your application's models will descend.
+* Register hooks at the start and end of a request to handle opening and
+  closing a database connection.
 
 Basic usage:
 
@@ -4175,28 +4290,43 @@ Basic usage:
     app = Flask(__name__)
     app.config.from_object(__name__)
 
-    database = FlaskDB(app)
+    db_wrapper = FlaskDB(app)
 
-    class User(database.Model):
+    class User(db_wrapper.Model):
         username = CharField(unique=True)
 
-    class Tweet(database.Model):
+    class Tweet(db_wrapper.Model):
         user = ForeignKeyField(User, related_name='tweets')
         content = TextField()
         timestamp = DateTimeField(default=datetime.datetime.now)
 
 The above code example will create and instantiate a peewee :py:class:`PostgresqlDatabase` specified by the given database URL. Request hooks will be configured to establish a connection when a request is received, and automatically close the connection when the response is sent. Lastly, the :py:class:`FlaskDB` class exposes a :py:attr:`FlaskDB.Model` property which can be used as a base for your application's models.
 
-.. note:: The underlying peewee database can be accessed using the ``FlaskDB.database`` attribute.
+Here is how you can access the wrapped Peewee database instance that is
+configured for you by the ``FlaskDB`` wrapper:
 
-If you prefer, you can also pass the database value directly into the ``FlaskDB`` object:
+.. code-block:: python
+
+    # Obtain a reference to the Peewee database instance.
+    peewee_db = db_wrapper.database
+
+    @app.route('/transfer-funds/', methods=['POST'])
+    def transfer_funds():
+        with peewee_db.atomic():
+            # ...
+
+        return jsonify({'transfer-id': xid})
+
+.. note:: The actual peewee database can be accessed using the ``FlaskDB.database`` attribute.
+
+Here is another way to configure a Peewee database using ``FlaskDB``:
 
 .. code-block:: python
 
     app = Flask(__name__)
-    database = FlaskDB(app, 'sqlite:///my_app.db')
+    db_wrapper = FlaskDB(app, 'sqlite:///my_app.db')
 
-While the above examples show using a database URL, for more advanced usages you can specify a dictionary of configuration options or simply pass in a peewee :py:class:`Database` instance:
+While the above examples show using a database URL, for more advanced usages you can specify a dictionary of configuration options, or simply pass in a peewee :py:class:`Database` instance:
 
 .. code-block:: python
 
@@ -4211,7 +4341,8 @@ While the above examples show using a database URL, for more advanced usages you
     app = Flask(__name__)
     app.config.from_object(__name__)
 
-    database = FlaskDB(app)
+    wrapper = FlaskDB(app)
+    pooled_postgres_db = wrapper.database
 
 Using a peewee :py:class:`Database` object:
 
@@ -4219,7 +4350,8 @@ Using a peewee :py:class:`Database` object:
 
     peewee_db = PostgresqlExtDatabase('my_app')
     app = Flask(__name__)
-    flask_db = FlaskDB(app, peewee_db)
+    db_wrapper = FlaskDB(app, peewee_db)
+
 
 Database with Application Factory
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -4230,18 +4362,18 @@ Using as a factory:
 
 .. code-block:: python
 
-    database = FlaskDB()
+    db_wrapper = FlaskDB()
 
     # Even though the database is not yet initialized, you can still use the
     # `Model` property to create model classes.
-    class User(database.Model):
+    class User(db_wrapper.Model):
         username = CharField(unique=True)
 
 
     def create_app():
         app = Flask(__name__)
         app.config['DATABASE'] = 'sqlite:////home/code/apps/my-database.db'
-        database.init_app(app)
+        db_wrapper.init_app(app)
         return app
 
 Query utilities

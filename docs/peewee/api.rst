@@ -310,30 +310,6 @@ Models
                 last_name='Lennon',
                 defaults={'birthday': datetime.date(1940, 10, 9)})
 
-    .. py:classmethod:: create_or_get([**kwargs])
-
-        :param kwargs: Field name to value for attempting to create a new instance.
-        :returns: A 2-tuple containing the model instance and a boolean indicating whether the instance was created.
-
-        This function attempts to create a model instance based on the provided kwargs. If an ``IntegrityError`` occurs indicating the violation of a constraint, then Peewee will return the model matching the filters.
-
-        .. note:: Peewee will not attempt to match *all* the kwargs when an ``IntegrityError`` occurs. Rather, only primary key fields or fields that have a unique constraint will be used to retrieve the matching instance.
-
-        .. note:: Use care when calling ``create_or_get`` with ``autocommit=False``, as the ``create_or_get()`` method will call :py:meth:`Database.atomic` to create either a transaction or savepoint.
-
-        Example:
-
-        .. code-block:: python
-
-            # This will succeed, there is no user named 'charlie' currently.
-            charlie, created = User.create_or_get(username='charlie')
-
-            # This will return the above object, since an IntegrityError occurs
-            # when trying to create an object using "charlie's" primary key.
-            user2, created = User.create_or_get(username='foo', id=charlie.id)
-
-            assert user2.username == 'charlie'
-
     .. py:classmethod:: alias()
 
         :rtype: :py:class:`ModelAlias` instance
@@ -805,7 +781,7 @@ Query Types
 
 .. py:class:: Query()
 
-    The parent class from which all other query classes are drived. While you
+    The parent class from which all other query classes are derived. While you
     will not deal with :py:class:`Query` directly in your code, it implements some
     methods that are common across all query types.
 
@@ -846,7 +822,8 @@ Query Types
         :param model: the model to join on.  there must be a :py:class:`ForeignKeyField` between
             the current ``query context`` and the model passed in.
         :param join_type: allows the type of ``JOIN`` used to be specified explicitly,
-            one of ``JOIN.INNER``, ``JOIN.LEFT_OUTER``, ``JOIN.FULL``
+            one of ``JOIN.INNER``, ``JOIN.LEFT_OUTER``, ``JOIN.FULL``, ``JOIN.RIGHT_OUTER``,
+            or ``JOIN.CROSS``.
         :param on: if multiple foreign keys exist between two models, this parameter
             is the ForeignKeyField to join on.
         :rtype: a :py:class:`Query` instance
@@ -1153,6 +1130,22 @@ Query Types
         Indicate that this query should lock rows for update.  If ``nowait`` is
         ``True`` then the database will raise an ``OperationalError`` if it
         cannot obtain the lock.
+
+    .. py:method:: with_lock([lock_type='UPDATE'])
+
+        :rtype: :py:class:`SelectQuery`
+
+        Indicates that this query shoudl lock rows. A more generic version of
+        the :py:meth:`~SelectQuery.for_update` method.
+
+        Example:
+
+        .. code-block:: python
+
+            # SELECT * FROM some_model FOR KEY SHARE NOWAIT;
+            SomeModel.select().with_lock('KEY SHARE NOWAIT')
+
+        .. note:: You do not need to include the word *FOR*.
 
     .. py:method:: naive()
 
@@ -2130,10 +2123,34 @@ Database and its subclasses
             the :py:meth:`~Database.set_autocommit` and :py:meth:`Database.get_autocommit`
             methods.
 
-    .. py:method:: begin()
+    .. py:method:: begin([lock_type=None])
 
         Initiate a new transaction.  By default **not** implemented as this is not
-        part of the DB-API 2.0, but provided for API compatibility.
+        part of the DB-API 2.0, but provided for API compatibility and to allow
+        SQLite users to specify the isolation level when beginning transactions.
+
+        For SQLite users, the valid isolation levels for ``lock_type`` are:
+
+        * ``exclusive``
+        * ``immediate``
+        * ``deferred``
+
+        Example usage:
+
+        .. code-block:: python
+
+            # Calling transaction() in turn calls begin('exclusive').
+            with db.transaction('exclusive'):
+                # No other readers or writers allowed while this is active.
+                (Account
+                 .update(Account.balance=Account.balance - 100)
+                 .where(Account.id == from_acct)
+                 .execute())
+
+                (Account
+                 .update(Account.balance=Account.balance + 100)
+                 .where(Account.id == to_acct)
+                 .execute())
 
     .. py:method:: commit()
 
@@ -2268,10 +2285,15 @@ Database and its subclasses
 
             db.drop_tables([User, Tweet, Something], safe=True)
 
-    .. py:method:: atomic()
+    .. py:method:: atomic([transaction_type=None])
 
         Execute statements in either a transaction or a savepoint. The outer-most call to *atomic* will use a transaction,
         and any subsequent nested calls will use savepoints.
+
+        :param str transaction_type: Specify isolation level. This parameter
+            only has effect on **SQLite databases**, and furthermore, only
+            affects the outer-most call to :py:meth:`~Database.atomic`. For
+            more information, see :py:meth:`~Database.transaction`.
 
         ``atomic`` can be used as either a context manager or a decorator.
 
@@ -2301,7 +2323,7 @@ Database and its subclasses
                 # This function will execute in a transaction/savepoint.
                 return User.create(username=username)
 
-    .. py:method:: transaction()
+    .. py:method:: transaction([transaction_type=None])
 
         Execute statements in a transaction using either a context manager or decorator. If an
         error is raised inside the wrapped block, the transaction will be rolled
@@ -2310,6 +2332,8 @@ Database and its subclasses
         Nested blocks can be wrapped with ``transaction`` - the database
         will keep a stack and only commit when it reaches the end of the outermost
         function / block.
+
+        :param str transaction_type: Specify isolation level, **SQLite only**.
 
         Context manager example code:
 
@@ -2337,6 +2361,29 @@ Database and its subclasses
                 from_acct.charge(amt)
                 to_acct.pay(amt)
                 return amt
+
+        SQLite users can specify the isolation level by specifying one of the
+        following values for ``transaction_type``:
+
+        * ``exclusive``
+        * ``immediate``
+        * ``deferred``
+
+        Example usage:
+
+        .. code-block:: python
+
+            with db.transaction('exclusive'):
+                # No other readers or writers allowed while this is active.
+                (Account
+                 .update(Account.balance=Account.balance - 100)
+                 .where(Account.id == from_acct)
+                 .execute())
+
+                (Account
+                 .update(Account.balance=Account.balance + 100)
+                 .where(Account.id == to_acct)
+                 .execute())
 
     .. py:method:: commit_on_success(func)
 
@@ -2651,12 +2698,14 @@ Misc
     ``fn.Stddev(Employee.salary).alias('sdv')``  ``Stddev(t1."salary") AS sdv``
     ============================================ ============================================
 
-    .. py:method:: over([partition_by=None[, order_by=None[, window=None]]])
+    .. py:method:: over([partition_by=None[, order_by=None[, start=None[, end=None[, window=None]]]]])
 
         Basic support for SQL window functions.
 
         :param list partition_by: List of :py:class:`Node` instances to partition by.
         :param list order_by: List of :py:class:`Node` instances to use for ordering.
+        :param start: The start of the *frame* of the window query.
+        :param end: The end of the *frame* of the window query.
         :param Window window: A :py:class:`Window` instance to use for this aggregate.
 
         Examples:
@@ -2701,6 +2750,15 @@ Misc
                      .window(window)  # Need to include our Window here.
                      .order_by(PageView.timestamp))
 
+            # Get the list of times along with the last time.
+            query = (Times
+                     .select(
+                          Times.time,
+                          fn.LAST_VALUE(Times.time).over(
+                              order_by=[Times.time],
+                              start=Window.preceding(),
+                              end=Window.following())))
+
 .. py:class:: SQL(sql, *params)
 
     Add fragments of SQL to a peewee query.  For example you might want to reference
@@ -2721,12 +2779,14 @@ Misc
         # Sort the users by number of tweets.
         query = query.order_by(SQL('ct DESC'))
 
-.. py:class:: Window([partition_by=None[, order_by=None]])
+.. py:class:: Window([partition_by=None[, order_by=None[, start=None[, end=None]]]])
 
     Create a ``WINDOW`` definition.
 
     :param list partition_by: List of :py:class:`Node` instances to partition by.
     :param list order_by: List of :py:class:`Node` instances to use for ordering.
+    :param start: The start of the *frame* of the window query.
+    :param end: The end of the *frame* of the window query.
 
     Examples:
 
@@ -2742,6 +2802,18 @@ Misc
                      fn.Avg(Employee.salary).over(window))
                  .window(window)
                  .order_by(Employee.name))
+
+    .. py:staticmethod:: preceding([value=None])
+
+        Return an expression appropriate for passing in to the ``start`` or
+        ``end`` clause of a :py:class:`Window` object. If ``value`` is not
+        provided, then it will be ``UNBOUNDED PRECEDING``.
+
+    .. py:staticmethod:: following([value=None])
+
+        Return an expression appropriate for passing in to the ``start`` or
+        ``end`` clause of a :py:class:`Window` object. If ``value`` is not
+        provided, then it will be ``UNBOUNDED FOLLOWING``.
 
 .. py:class:: DeferredRelation()
 

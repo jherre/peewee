@@ -5,6 +5,130 @@ releases, visit GitHub:
 
 https://github.com/coleifer/peewee/releases
 
+## 2.9.1
+
+* Fixed #1218, where the use of `playhouse.flask_utils` was requiring the
+  `sqlite3` module to be installed.
+* Fixed #1219 regarding the SQL generation for composite key sub-selects,
+  joins, etc.
+
+[View commits](https://github.com/coleifer/peewee/compare/2.9.0...2.9.1)
+
+## 2.9.0
+
+In this release there are two notable changes:
+
+* The ``Model.create_or_get()`` method was removed. See the [documentation](http://docs.peewee-orm.com/en/latest/peewee/querying.html#create-or-get)
+  for an example of the code one would write to replicate this functionality.
+* The SQLite closure table extension gained support for many-to-many
+  relationships thanks to a nice PR by @necoro. [Docs](http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#ClosureTable).
+
+[View commits](https://github.com/coleifer/peewee/compare/2.8.8...2.9.0)
+
+## 2.8.8
+
+This release contains a single important bugfix for a regression in specifying
+the type of lock to use when opening a SQLite transaction.
+
+[View commits](https://github.com/coleifer/peewee/compare/2.8.7...2.8.8)
+
+## 2.8.7
+
+This release contains numerous cleanups.
+
+### Bugs fixed
+
+* #1087 - Fixed a misuse of the iteration protocol in the `sqliteq` extension.
+* Ensure that driver exceptions are wrapped when calling `commit` and
+  `rollback`.
+* #1096 - Fix representation of recursive foreign key relations when using the
+  `model_to_dict` helper.
+* #1126 - Allow `pskel` to be installed into `bin` directory.
+* #1105 - Added a `Tuple()` type to Peewee to enable expressing arbitrary
+  tuple expressions in SQL.
+* #1133 - Fixed bug in the conversion of objects to `Decimal` instances in the
+  `DecimalField`.
+* Fixed an issue renaming a unique foreign key in MySQL.
+* Remove the join predicate from CROSS JOINs.
+* #1148 - Ensure indexes are created when a column is added using a schema
+  migration.
+* #1165 - Fix bug where the primary key was being overwritten in queries using
+  the closure-table extension.
+
+### New stuff
+
+* Added properties to the `SqliteExtDatabase` to expose common `PRAGMA`
+  settings. For example, to set the cache size to 4MB, `db.cache_size = 1000`.
+* Clarified documentation on calling `commit()` or `rollback()` from within the
+  scope of an atomic block. [See docs](http://docs.peewee-orm.com/en/latest/peewee/transactions.html#transactions).
+* Allow table creation dependencies to be specified using new `depends_on` meta
+  option. Refs #1076.
+* Allow specification of the lock type used in SQLite transactions. Previously
+  this behavior was only present in `playhouse.sqlite_ext.SqliteExtDatabase`,
+  but it now exists in `peewee.SqliteDatabase`.
+* Added support for `CROSS JOIN` expressions in select queries.
+* Docs on how to implement [optimistic locking](http://docs.peewee-orm.com/en/latest/peewee/hacks.html#optimistic-locking).
+* Documented optional dependencies.
+* Generic support for specifying select queries as locking the selected rows
+  `FOR X`, e.g. `FOR UPDATE` or `FOR SHARE`.
+* Support for specifying the frame-of-reference in window queries, e.g.
+  specifying `UNBOUNDED PRECEDING`, etc. [See docs](http://docs.peewee-orm.com/en/latest/peewee/api.html#Window).
+
+### Backwards-incompatible changes
+
+* As of 9e76c99, an `OperationalError` is raised if the user calls `connect()`
+  on an already-open Database object. Previously, the existing connection would
+  remain open and a new connection would overwrite it, making it impossible to
+  close the previous connection. If you find this is causing breakage in your
+  application, you can switch the `connect()` call to `get_conn()` which will
+  only open a connection if necessary. The error **is** indicative of a real
+  issue, though, so audit your code for places where you may be opening a
+  connection without closing it (module-scope operations, e.g.).
+
+[View commits](https://github.com/coleifer/peewee/compare/2.8.5...2.8.7)
+
+## 2.8.6
+
+This release was later removed due to containing a bug. See notes on 2.8.7.
+
+## 2.8.5
+
+This release contains two small bugfixes.
+
+* #1081 - fixed the use of parentheses in compound queries on MySQL.
+* Fixed some grossness in a helper function used by `prefetch` that was
+  clearing out the `GROUP BY` and `HAVING` clauses of sub-queries.
+
+[View commits](https://github.com/coleifer/peewee/compare/2.8.4...2.8.5)
+
+## 2.8.4
+
+This release contains bugfixes as well as a new playhouse extension module for
+working with [SQLite in multi-threaded / concurrent environments](http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#sqliteq).
+The new module is called `playhouse.sqliteq` and it works by serializing
+queries using a dedicated worker thread (or greenlet). The performance is quite
+good, hopefully this proves useful to someone besides myself! You can learn
+more by reading the [sqliteq documentation](http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#sqliteq).
+
+As a miscellaneous note, I did some major refactoring and cleanup in
+`ExtQueryResultsWrapper` and it's corollary in the `speedups` module. The code
+is much easier to read than before.
+
+[View commits](https://github.com/coleifer/peewee/compare/2.8.3...2.8.4)
+
+### Bugs fixed
+
+* #1061 - @akrs patched a bug in `TimestampField` which affected the accuracy
+  of sub-second timestamps (for resolution > 1).
+* #1071, small python 3 fix.
+* #1072, allow `DeferredRelation` to be used multiple times if there are
+  multiple references to a given deferred model.
+* #1073, fixed regression in the speedups module that caused SQL functions to
+  always coerce return values, regardless of the `coerce` flag.
+* #1083, another Python 3 issue - this time regarding the use of `exc.message`.
+
+[View commits](https://github.com/coleifer/peewee/compare/2.8.3...2.8.4)
+
 ## 2.8.3
 
 This release contains bugfixes and a small backwards-incompatible change to the

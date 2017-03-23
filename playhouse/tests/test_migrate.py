@@ -1,5 +1,6 @@
 import datetime
 import os
+from functools import partial
 
 from peewee import *
 from peewee import print_
@@ -59,6 +60,10 @@ class Page(Model):
     name = CharField(max_length=100, unique=True, null=True)
     user = ForeignKeyField(User, null=True, related_name='pages')
 
+class Session(Model):
+    user = ForeignKeyField(User, unique=True, related_name='sessions')
+    updated_at = DateField(null=True)
+
 class IndexModel(Model):
     first_name = CharField()
     last_name = CharField()
@@ -75,6 +80,7 @@ MODELS = [
     Tag,
     User,
     Page,
+    Session
 ]
 
 class BaseMigrationTestCase(object):
@@ -123,8 +129,7 @@ class BaseMigrationTestCase(object):
         t2 = Tag.create(tag='t2')
 
         # Convenience function for generating `add_column` migrations.
-        def add_column(field_name, field_obj):
-            return self.migrator.add_column('tag', field_name, field_obj)
+        add_column = partial(self.migrator.add_column, 'tag')
 
         # Run the migration.
         migrate(
@@ -360,6 +365,27 @@ class BaseMigrationTestCase(object):
                 first_name='first',
                 last_name='last')
 
+    def test_add_unique_column(self):
+        uf = CharField(default='', unique=True)
+
+        # Run the migration.
+        migrate(self.migrator.add_column('tag', 'unique_field', uf))
+
+        # Create a new tag model to represent the fields we added.
+        class NewTag(Model):
+            tag = CharField()
+            unique_field = uf
+
+            class Meta:
+                database = self.database
+                db_table = Tag._meta.db_table
+
+        NewTag.create(tag='t1', unique_field='u1')
+        NewTag.create(tag='t2', unique_field='u2')
+        with self.database.atomic():
+            self.assertRaises(IntegrityError, NewTag.create, tag='t3',
+                              unique_field='u1')
+
     def test_drop_index(self):
         # Create a unique index.
         self.test_add_index()
@@ -493,6 +519,19 @@ class BaseMigrationTestCase(object):
         self.assertEqual(foreign_key.dest_column, 'id')
         self.assertEqual(foreign_key.dest_table, 'users')
 
+    def test_rename_unique_foreign_key(self):
+        migrate(self.migrator.rename_column('session', 'user_id', 'huey_id'))
+        columns = self.database.get_columns('session')
+        self.assertEqual(
+            sorted(column.name for column in columns),
+            ['huey_id', 'id', 'updated_at'])
+
+        foreign_keys = self.database.get_foreign_keys('session')
+        self.assertEqual(len(foreign_keys), 1)
+        foreign_key = foreign_keys[0]
+        self.assertEqual(foreign_key.column, 'huey_id')
+        self.assertEqual(foreign_key.dest_column, 'id')
+        self.assertEqual(foreign_key.dest_table, 'users')
 
 class SqliteMigrationTestCase(BaseMigrationTestCase, PeeweeTestCase):
     database = sqlite_db
