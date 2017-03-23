@@ -16,7 +16,7 @@ env:
   - PEEWEE_TEST_BACKEND=postgresql CYTHON_VERSION=0.25.2
   - PEEWEE_TEST_BACKEND=mysql CYTHON_VERSION=0.25.2
 addons:
-  postgresql: "9.5"
+  postgresql: "9.4"
 services:
   - postgresql
   - mysql
